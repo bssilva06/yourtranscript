@@ -9,7 +9,7 @@ YouTube Transcript SaaS — a freemium ($9/mo Pro tier) web app for extracting Y
 ## Repository Structure
 
 ```
-apps/web/       — Next.js 14 (App Router) frontend + API routes (TypeScript, Tailwind, shadcn/ui)
+apps/web/       — Next.js 16 (App Router) frontend + API routes (TypeScript, Tailwind, shadcn/ui)
 apps/worker/    — Python 3.11 FastAPI worker for transcript extraction
 packages/shared/— Shared types/utilities (future)
 infra/          — Infrastructure configuration placeholders
@@ -17,7 +17,7 @@ infra/          — Infrastructure configuration placeholders
 
 ## Tech Stack
 
-- **Frontend:** Next.js 14 (App Router), TypeScript, Tailwind CSS, shadcn/ui, Zustand — deployed on Vercel
+- **Frontend:** Next.js 16 (App Router), TypeScript, Tailwind CSS, shadcn/ui, Zustand — deployed on Vercel
 - **API Gateway:** Next.js API routes (Node.js 20+) — auth checks, rate limiting, billing webhooks, queue dispatch
 - **Worker:** Python 3.11 + FastAPI on Google Cloud Run — transcript extraction
 - **Database:** Supabase Postgres + Supabase Auth
