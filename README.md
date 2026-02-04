@@ -1,14 +1,33 @@
 # YouTube Transcript SaaS
 
-This repository contains the initial project structure for a YouTube transcript SaaS.
+This repository contains the initial codebase for a YouTube transcript SaaS.
 
 ## Repo Layout
-- `apps/web/` — Next.js 14 (App Router) frontend + API routes
+- `apps/web/` — Next.js 16 (App Router) frontend + API routes
 - `apps/worker/` — Python FastAPI worker for transcript extraction
 - `packages/shared/` — Shared types/utilities (future)
 - `infra/` — Infra notes and configuration placeholders
 
-## Next Steps
-- Initialize Next.js app in `apps/web/`
-- Initialize Python worker in `apps/worker/`
-- Add environment variable templates in each app
+## Quick Start
+
+### Web app
+```bash
+cd apps/web
+npm install
+npm run dev
+```
+
+### Worker
+```bash
+cd apps/worker
+python -m venv venv
+venv\\Scripts\\activate
+pip install -r requirements.txt
+uvicorn main:app --reload
+```
+
+## Environment
+- `apps/web/.env.example` — web app environment variables
+- `apps/worker/.env.example` — worker environment variables
+
+Copy these to `.env.local` or `.env` as appropriate before running locally.
