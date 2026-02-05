@@ -49,22 +49,24 @@ export function TranscriptExtractor() {
     setVideoTitle(null);
 
     try {
-      // TODO: Replace with actual API call to worker
-      // For now, simulate a response
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      const response = await fetch("/api/extract", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ video_id: videoId }),
+      });
 
-      // Mock response - will be replaced with real API call
-      const mockTranscript: TranscriptSegment[] = [
-        { text: "Welcome to this video tutorial.", start: 0, duration: 2.5 },
-        { text: "Today we're going to learn about building modern web applications.", start: 2.5, duration: 4.2 },
-        { text: "First, let's start with the basics of our tech stack.", start: 6.7, duration: 3.8 },
-        { text: "We'll be using Next.js for our frontend framework.", start: 10.5, duration: 3.2 },
-        { text: "It provides excellent developer experience and performance.", start: 13.7, duration: 4.1 },
-        { text: "Let me show you how to set everything up step by step.", start: 17.8, duration: 3.5 },
-      ];
+      const data = await response.json();
 
-      setTranscript(mockTranscript);
-      setVideoTitle(`Video ${videoId}`);
+      if (!response.ok) {
+        setError(data.error || "Failed to extract transcript");
+        setState("error");
+        return;
+      }
+
+      setTranscript(data.segments);
+      setVideoTitle(`Video ${data.video_id}`);
       setState("success");
     } catch {
       setError("Failed to extract transcript. Please try again.");
