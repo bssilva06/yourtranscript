@@ -1,3 +1,4 @@
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -27,6 +28,13 @@ class TranscriptRequest(BaseModel):
     video_id: str
 
 
+class AsyncTranscriptRequest(BaseModel):
+    video_id: str
+    job_id: str
+    callback_url: str
+    user_id: str
+
+
 class TranscriptSegment(BaseModel):
     text: str
     start: float
@@ -39,29 +47,17 @@ class TranscriptResponse(BaseModel):
     language: str
 
 
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
-
-
-@app.post("/extract", response_model=TranscriptResponse)
-async def extract_transcript(request: TranscriptRequest):
-    """
-    Extract transcript from a YouTube video using youtube-transcript-api.
-    This is the free fallback method for development.
-    """
-    video_id = request.video_id.strip()
+def _extract(video_id: str) -> tuple[list[TranscriptSegment], str]:
+    """Shared extraction logic used by both sync and async endpoints."""
+    video_id = video_id.strip()
 
     if not video_id:
         raise HTTPException(status_code=400, detail="video_id is required")
 
-    # Validate video_id format (11 characters, alphanumeric with - and _)
     if len(video_id) != 11:
         raise HTTPException(status_code=400, detail="Invalid video_id format")
 
     try:
-        # Fetch transcript using the simplified fetch method
-        # It automatically tries to find the best available transcript
         transcript_data = yt_api.fetch(video_id, languages=["en", "en-US", "en-GB"])
 
         segments = [
@@ -73,11 +69,7 @@ async def extract_transcript(request: TranscriptRequest):
             for segment in transcript_data
         ]
 
-        return TranscriptResponse(
-            video_id=video_id,
-            segments=segments,
-            language="en",
-        )
+        return segments, "en"
 
     except TranscriptsDisabled:
         raise HTTPException(
@@ -94,8 +86,68 @@ async def extract_transcript(request: TranscriptRequest):
             status_code=404,
             detail="Video is unavailable or does not exist",
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail=f"Failed to extract transcript: {str(e)}",
         )
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+@app.post("/extract", response_model=TranscriptResponse)
+async def extract_transcript(request: TranscriptRequest):
+    """
+    Synchronous transcript extraction (used in dev mode).
+    """
+    segments, language = _extract(request.video_id)
+    return TranscriptResponse(
+        video_id=request.video_id.strip(),
+        segments=segments,
+        language=language,
+    )
+
+
+@app.post("/extract-async")
+async def extract_transcript_async(request: AsyncTranscriptRequest):
+    """
+    Async transcript extraction triggered by QStash.
+    Extracts the transcript and POSTs the result to the callback URL.
+    """
+    video_id = request.video_id.strip()
+
+    try:
+        segments, language = _extract(video_id)
+
+        callback_payload = {
+            "job_id": request.job_id,
+            "video_id": video_id,
+            "user_id": request.user_id,
+            "segments": [s.model_dump() for s in segments],
+            "language": language,
+        }
+    except HTTPException as e:
+        callback_payload = {
+            "job_id": request.job_id,
+            "video_id": video_id,
+            "user_id": request.user_id,
+            "error": e.detail,
+        }
+
+    # POST result back to the Next.js callback endpoint
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            await client.post(request.callback_url, json=callback_payload)
+        except Exception as e:
+            print(f"Callback POST failed: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to deliver result to callback: {str(e)}",
+            )
+
+    return {"status": "delivered"}

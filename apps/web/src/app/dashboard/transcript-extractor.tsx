@@ -28,6 +28,37 @@ export function TranscriptExtractor() {
     return null;
   };
 
+  const pollJobStatus = async (jobId: string): Promise<void> => {
+    const MAX_POLLS = 60;
+    const POLL_INTERVAL = 2000;
+
+    for (let i = 0; i < MAX_POLLS; i++) {
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
+
+      const res = await fetch(`/api/extract/status?job_id=${encodeURIComponent(jobId)}`);
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to check job status");
+      }
+
+      if (data.status === "completed" && data.segments) {
+        setTranscript(data.segments);
+        setVideoTitle(`Video ${data.video_id}`);
+        setState("success");
+        return;
+      }
+
+      if (data.status === "failed") {
+        throw new Error(data.error || "Extraction failed");
+      }
+
+      // status === "processing" — keep polling
+    }
+
+    throw new Error("Extraction timed out. Please try again.");
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const videoId = extractVideoId(url.trim());
@@ -60,11 +91,18 @@ export function TranscriptExtractor() {
         return;
       }
 
+      // Async mode: API returned a job ID — poll for result
+      if (data.status === "processing" && data.job_id) {
+        await pollJobStatus(data.job_id);
+        return;
+      }
+
+      // Sync mode or cache hit: result is inline
       setTranscript(data.segments);
       setVideoTitle(`Video ${data.video_id}`);
       setState("success");
-    } catch {
-      setError("Failed to extract transcript. Please try again.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to extract transcript. Please try again.");
       setState("error");
     }
   };

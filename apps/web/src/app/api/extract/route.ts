@@ -2,10 +2,12 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
 import { redis, TRANSCRIPT_CACHE_TTL } from "@/lib/redis";
+import { qstash, isQStashEnabled, JOB_STATUS_TTL } from "@/lib/qstash";
 import type { TranscriptSegment } from "@/lib/types";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 const WORKER_URL = process.env.WORKER_URL || "http://localhost:8000";
+const QSTASH_CALLBACK_URL = process.env.QSTASH_CALLBACK_URL || "";
 const FREE_TIER_DAILY_LIMIT = 5;
 
 /** Shape of the cached transcript data in Redis */
@@ -136,7 +138,49 @@ export async function POST(request: Request) {
     });
   }
 
-  // ── Tier 2: Call the Python worker (fresh extraction) ──
+  // ── Tier 2: Fresh extraction (sync in dev, async via QStash in prod) ──
+
+  if (isQStashEnabled()) {
+    // ── Async mode (production): enqueue via QStash ──
+    const jobId = `job:${video_id}:${Date.now()}`;
+
+    try {
+      // Store initial job status in Redis
+      await redis.set(
+        jobId,
+        { status: "processing", video_id, user_id: user.id },
+        { ex: JOB_STATUS_TTL }
+      );
+
+      // Publish to QStash — it will POST to the worker's /extract-async endpoint
+      await qstash.publishJSON({
+        url: `${WORKER_URL}/extract-async`,
+        body: {
+          video_id,
+          job_id: jobId,
+          callback_url: `${QSTASH_CALLBACK_URL}/api/extract/callback`,
+          user_id: user.id,
+        },
+        retries: 2,
+      });
+
+      return NextResponse.json({
+        status: "processing",
+        job_id: jobId,
+        video_id,
+      });
+    } catch (error) {
+      console.error("QStash publish failed:", error);
+      const latency = Date.now() - startTime;
+      await logRequest(serviceClient, user.id, video_id, "error", "error", 0, latency, "QStash publish failed");
+      return NextResponse.json(
+        { error: "Failed to enqueue extraction job" },
+        { status: 503 }
+      );
+    }
+  }
+
+  // ── Sync mode (dev): call worker directly ──
   try {
     const workerResponse = await fetch(`${WORKER_URL}/extract`, {
       method: "POST",

@@ -70,17 +70,16 @@ When implementing features, check `youtube-saas-quick-start-guide.md` for curren
 - Python FastAPI worker with `/extract` endpoint (youtube-transcript-api)
 - API route `/api/extract` — auth, rate limiting, DB caching, request logging
 - Service-role Supabase client for server-side writes (`src/lib/supabase/service.ts`)
+- Upstash Redis caching layer (`src/lib/redis.ts`) — waterfall: Redis → DB → Worker, 7-day TTL, non-fatal failures
 - Database schema with RLS policies, auto-profile trigger, daily counter functions
 - Edge proxy (`src/proxy.ts`) for auth redirects on protected routes
 
 **What's NOT wired up yet (planned):**
-- Upstash Redis caching layer (next up — account created, integration pending)
-- Upstash QStash async job queue (currently worker is called synchronously)
 - ScrapingBee integration (planned Week 7 — using youtube-transcript-api for now)
 - Stripe payments (planned Week 9)
 - Zustand state management (listed in stack but not needed yet)
 
-**Important architectural note:** The `/api/extract` route currently calls the Python worker synchronously via `fetch()`. This works for development but must switch to QStash before deploying to Vercel (10s function timeout on Hobby tier).
+**Async extraction (QStash):** The `/api/extract` route supports hybrid sync/async mode controlled by `USE_QSTASH` env var. In dev (`USE_QSTASH=false`, default), the worker is called synchronously. In production (`USE_QSTASH=true`), jobs are enqueued via QStash → worker's `/extract-async` endpoint → callback to `/api/extract/callback` → client polls `/api/extract/status`. Job status is tracked in Redis with 5-min TTL.
 
 ## How To Work In This Repo (Rules)
 
