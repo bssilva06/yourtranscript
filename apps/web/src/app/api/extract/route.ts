@@ -1,14 +1,11 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { createServiceClient } from "@/lib/supabase/service";
+import type { TranscriptSegment } from "@/lib/types";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 const WORKER_URL = process.env.WORKER_URL || "http://localhost:8000";
 const FREE_TIER_DAILY_LIMIT = 5;
-
-interface TranscriptSegment {
-  text: string;
-  start: number;
-  duration: number;
-}
 
 interface WorkerResponse {
   video_id: string;
@@ -23,8 +20,9 @@ interface WorkerError {
 export async function POST(request: Request) {
   const startTime = Date.now();
   const supabase = await createClient();
+  const serviceClient = createServiceClient();
 
-  // Check authentication
+  // Check authentication (uses anon client with user's cookie)
   const { data: { user } } = await supabase.auth.getUser();
 
   if (!user) {
@@ -54,7 +52,7 @@ export async function POST(request: Request) {
     );
   }
 
-  // Check rate limit for free users
+  // Check rate limit for free users (read via anon client — RLS allows SELECT on own profile)
   const { data: profile } = await supabase
     .from("user_profiles")
     .select("subscription_tier, daily_extractions_count, daily_extractions_reset_at")
@@ -62,7 +60,6 @@ export async function POST(request: Request) {
     .single();
 
   if (profile?.subscription_tier === "free") {
-    // Check if we need to reset the daily count
     const resetAt = new Date(profile.daily_extractions_reset_at);
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -73,7 +70,7 @@ export async function POST(request: Request) {
     }
 
     if (currentCount >= FREE_TIER_DAILY_LIMIT) {
-      await logRequest(supabase, user.id, video_id, "error", "rate_limit", 0, Date.now() - startTime, "Daily limit exceeded");
+      await logRequest(serviceClient, user.id, video_id, "error", "rate_limit", 0, Date.now() - startTime, "Daily limit exceeded");
       return NextResponse.json(
         { error: `Daily limit of ${FREE_TIER_DAILY_LIMIT} transcripts reached. Upgrade to Pro for unlimited access.` },
         { status: 429 }
@@ -81,7 +78,7 @@ export async function POST(request: Request) {
     }
   }
 
-  // Check cache first (database)
+  // Check cache first (read via anon client — RLS allows SELECT for authenticated)
   const { data: cached } = await supabase
     .from("transcripts")
     .select("content, language")
@@ -90,9 +87,8 @@ export async function POST(request: Request) {
 
   if (cached) {
     const latency = Date.now() - startTime;
-    await logRequest(supabase, user.id, video_id, "cached", "db_cache", 0, latency);
-    // Increment daily count even for cached results
-    await incrementDailyCount(supabase, user.id);
+    await logRequest(serviceClient, user.id, video_id, "cached", "db_cache", 0, latency);
+    await incrementDailyCount(serviceClient, user.id);
 
     return NextResponse.json({
       video_id,
@@ -115,7 +111,7 @@ export async function POST(request: Request) {
     if (!workerResponse.ok) {
       const errorData: WorkerError = await workerResponse.json();
       const latency = Date.now() - startTime;
-      await logRequest(supabase, user.id, video_id, "error", "error", 0, latency, errorData.detail);
+      await logRequest(serviceClient, user.id, video_id, "error", "error", 0, latency, errorData.detail);
       return NextResponse.json(
         { error: errorData.detail || "Extraction failed" },
         { status: workerResponse.status }
@@ -125,9 +121,9 @@ export async function POST(request: Request) {
     const data: WorkerResponse = await workerResponse.json();
     const latency = Date.now() - startTime;
 
-    // Cache the transcript in database
+    // Cache the transcript (write via service client — RLS requires service_role)
     const textBlob = data.segments.map(s => s.text).join(" ");
-    await supabase.from("transcripts").upsert({
+    await serviceClient.from("transcripts").upsert({
       video_id: data.video_id,
       language: data.language,
       content: data.segments,
@@ -135,11 +131,11 @@ export async function POST(request: Request) {
       updated_at: new Date().toISOString(),
     });
 
-    // Log the successful request
-    await logRequest(supabase, user.id, video_id, "success", "youtube_api", 0, latency);
+    // Log the successful request (write via service client)
+    await logRequest(serviceClient, user.id, video_id, "success", "youtube_api", 0, latency);
 
-    // Increment daily extraction count
-    await incrementDailyCount(supabase, user.id);
+    // Increment daily extraction count (write via service client)
+    await incrementDailyCount(serviceClient, user.id);
 
     return NextResponse.json({
       ...data,
@@ -148,7 +144,7 @@ export async function POST(request: Request) {
   } catch (error) {
     console.error("Worker request failed:", error);
     const latency = Date.now() - startTime;
-    await logRequest(supabase, user.id, video_id, "error", "error", 0, latency, "Worker connection failed");
+    await logRequest(serviceClient, user.id, video_id, "error", "error", 0, latency, "Worker connection failed");
     return NextResponse.json(
       { error: "Failed to connect to extraction service" },
       { status: 503 }
@@ -157,7 +153,7 @@ export async function POST(request: Request) {
 }
 
 async function logRequest(
-  supabase: Awaited<ReturnType<typeof createClient>>,
+  client: SupabaseClient,
   userId: string,
   videoId: string,
   status: string,
@@ -167,7 +163,7 @@ async function logRequest(
   errorMessage?: string
 ) {
   try {
-    await supabase.from("request_logs").insert({
+    await client.from("request_logs").insert({
       user_id: userId,
       video_id: videoId,
       status,
@@ -182,11 +178,11 @@ async function logRequest(
 }
 
 async function incrementDailyCount(
-  supabase: Awaited<ReturnType<typeof createClient>>,
+  client: SupabaseClient,
   userId: string
 ) {
   try {
-    await supabase.rpc("increment_daily_extractions", { p_user_id: userId });
+    await client.rpc("increment_daily_extractions", { p_user_id: userId });
   } catch (e) {
     console.error("Failed to increment daily count:", e);
   }

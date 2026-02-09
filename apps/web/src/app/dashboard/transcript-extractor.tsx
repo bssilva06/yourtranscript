@@ -3,14 +3,9 @@
 import { useState, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import type { TranscriptSegment } from "@/lib/types";
 
 type ExtractorState = "idle" | "loading" | "success" | "error";
-
-interface TranscriptSegment {
-  text: string;
-  start: number;
-  duration: number;
-}
 
 export function TranscriptExtractor() {
   const [url, setUrl] = useState("");
