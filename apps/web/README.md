@@ -1,17 +1,50 @@
-Next.js web app for the YouTube Transcript SaaS. This app serves the UI and API routes (auth, rate limiting, job dispatch, billing).
+# Web App (Next.js)
+
+Next.js 16 frontend and API gateway for YourTranscript. Handles the UI, authentication, rate limiting, transcript caching, and request logging.
+
+## Pages & Routes
+
+| Route | Type | Description |
+|-------|------|-------------|
+| `/` | Page | Landing page with hero, signup/login links |
+| `/login` | Page | Email/password login form |
+| `/signup` | Page | Account registration form |
+| `/dashboard` | Page | Main dashboard — transcript extractor + recent history |
+| `/dashboard/settings` | Page | Account settings — profile, tier, usage bar |
+| `/dashboard/transcript/[videoId]` | Page | Full transcript detail view for a specific video |
+| `/api/extract` | API (POST) | Extracts transcript — checks auth, rate limit, cache, then calls worker |
+| `/auth/callback` | API (GET) | Supabase auth callback for session exchange |
+
+## Architecture
+
+- `src/proxy.ts` — Next.js 16 edge proxy for auth redirects (protects `/dashboard/*`, redirects logged-in users away from `/login` and `/signup`)
+- `src/lib/supabase/client.ts` — Browser Supabase client (anon key, cookie-based auth)
+- `src/lib/supabase/server.ts` — Server Supabase client (anon key, reads cookies for auth)
+- `src/lib/supabase/service.ts` — Service-role Supabase client (bypasses RLS for server-side writes)
+- `src/lib/types.ts` — Shared TypeScript types (`TranscriptSegment`, `TranscriptHistoryItem`)
+- `src/components/ui/` — shadcn/ui components (Button, Card, Input, Label, Textarea)
+
+## API Route: `/api/extract`
+
+**POST** with `{ "video_id": "dQw4w9WgXcQ" }`
+
+Flow:
+1. Verify auth (Supabase JWT via cookies)
+2. Check rate limit (free tier: 5/day)
+3. Check DB cache (`transcripts` table)
+4. If not cached, call Python worker at `WORKER_URL/extract`
+5. Cache result to DB, log request, increment daily count
+6. Return transcript segments
+
+Uses anon client for reads (respects RLS) and service-role client for writes.
 
 ## Getting Started
 
-Install dependencies and run the development server:
-
 ```bash
 npm install
-npm run dev
+cp .env.example .env.local   # fill in values
+npm run dev                   # http://localhost:3000
 ```
-
-Open http://localhost:3000 in your browser.
-
-You can start editing the page by modifying `src/app/page.tsx`. The page auto-updates as you edit the file.
 
 ## Scripts
 
@@ -19,33 +52,34 @@ You can start editing the page by modifying `src/app/page.tsx`. The page auto-up
 npm run dev    # start dev server
 npm run build  # production build
 npm run start  # start production server
-npm run lint   # lint
+npm run lint   # run ESLint
 ```
 
 ## Environment
 
-Copy `apps/web/.env.example` to `apps/web/.env.local` and fill in values.
-This app expects Supabase, Upstash (Redis + QStash), and Stripe keys.
+Copy `.env.example` to `.env.local` and fill in:
+
+- `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` — Supabase project
+- `SUPABASE_SERVICE_ROLE_KEY` — for server-side writes (never expose to browser)
+- `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` — Redis cache (in progress)
+- Stripe keys — planned for Week 9
 
 ## Tech Stack
 
-- Next.js 16.1.6
-- React 19
-- TypeScript (strict)
-- Tailwind CSS v4
-- ESLint
+- Next.js 16.1.6 (App Router)
+- React 19.2.3
+- TypeScript (strict mode)
+- Tailwind CSS v4 (CSS-based config via `@theme inline`)
+- shadcn/ui (Button, Card, Input, Label, Textarea)
+- Supabase SSR (`@supabase/ssr`)
+- Custom fonts: Instrument Serif (display), DM Sans (body)
+- Custom color theme: warm cream background with terracotta accent
 
-## Learn More
+## Dependencies
 
-To learn more about Next.js, take a look at the following resources:
+See `package.json` for the full list. Key packages:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out the [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- `next`, `react`, `react-dom` — framework
+- `@supabase/ssr`, `@supabase/supabase-js` — auth and database
+- `class-variance-authority`, `clsx`, `tailwind-merge` — styling utilities
+- `lucide-react`, `radix-ui` — icons and primitives
