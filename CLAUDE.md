@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+**Keep this file up to date.** When you implement a feature, fix a bug, add a new service integration, or change the architecture, update the relevant sections of this file (especially "Current Implementation Status" and "Database Schema"). This file should always reflect the actual state of the codebase.
+
 ## Project Overview
 
 YouTube Transcript SaaS — a freemium ($9/mo Pro tier) web app for extracting YouTube transcripts, with planned AI summaries. MVP target: 12 weeks, $143 budget. See `youtube-saas-quick-start-guide.md` for the full roadmap and budget breakdown.
@@ -9,10 +11,11 @@ YouTube Transcript SaaS — a freemium ($9/mo Pro tier) web app for extracting Y
 ## Repository Structure
 
 ```
-apps/web/       — Next.js 16 (App Router) frontend + API routes (TypeScript, Tailwind, shadcn/ui)
-apps/worker/    — Python 3.11 FastAPI worker for transcript extraction
-packages/shared/— Shared types/utilities (future)
-infra/          — Infrastructure configuration placeholders
+apps/web/        — Next.js 16 (App Router) frontend + API routes (TypeScript, Tailwind, shadcn/ui)
+apps/worker/     — Python 3.11 FastAPI worker for transcript extraction
+packages/shared/ — Shared types/utilities (future)
+infra/           — Infrastructure configuration placeholders
+supabase/        — Database migrations (schema, RLS policies, functions)
 ```
 
 ## Tech Stack
@@ -56,12 +59,37 @@ Focus: Basic transcription only, no AI features yet.
 
 When implementing features, check `youtube-saas-quick-start-guide.md` for current phase priorities.
 
+## Current Implementation Status
+
+**What's built and working (Weeks 1-5):**
+- Landing page, login, signup (Supabase Auth email/password)
+- Dashboard with transcript extractor (paste URL → get text)
+- Transcript detail pages (`/dashboard/transcript/[videoId]`)
+- Recent transcript history with search/filter
+- Account settings page (profile, tier badge, daily usage bar)
+- Python FastAPI worker with `/extract` endpoint (youtube-transcript-api)
+- API route `/api/extract` — auth, rate limiting, DB caching, request logging
+- Service-role Supabase client for server-side writes (`src/lib/supabase/service.ts`)
+- Database schema with RLS policies, auto-profile trigger, daily counter functions
+- Edge proxy (`src/proxy.ts`) for auth redirects on protected routes
+
+**What's NOT wired up yet (planned):**
+- Upstash Redis caching layer (next up — account created, integration pending)
+- Upstash QStash async job queue (currently worker is called synchronously)
+- ScrapingBee integration (planned Week 7 — using youtube-transcript-api for now)
+- Stripe payments (planned Week 9)
+- Zustand state management (listed in stack but not needed yet)
+
+**Important architectural note:** The `/api/extract` route currently calls the Python worker synchronously via `fetch()`. This works for development but must switch to QStash before deploying to Vercel (10s function timeout on Hobby tier).
+
 ## How To Work In This Repo (Rules)
 
 - Use `apps/web` (Next.js API routes) for auth, rate limiting, billing webhooks, and job dispatch.
 - Use `apps/worker` (FastAPI) only for transcript extraction logic.
 - Default dev workflow must avoid paid services; prefer `youtube-transcript-api` unless explicitly asked.
-- Always follow the flow: cache check → queue job → worker → DB update → client polls.
+- Target flow (once QStash is wired up): cache check → queue job → worker → DB update → client polls.
+- Use the **anon/cookie client** (`createClient` from `server.ts`) for auth checks and RLS-respecting reads.
+- Use the **service-role client** (`createServiceClient` from `service.ts`) for all server-side writes (request_logs, transcript upserts, daily count increments). Never expose this client to the browser.
 
 **Additional rules:**
 - Always create `.env.example` files (never commit actual `.env`)
@@ -95,17 +123,23 @@ When implementing features, check `youtube-saas-quick-start-guide.md` for curren
 ## Common Pitfalls (Don't Do This)
 
 - ❌ Don't scrape from main server IP (always use ScrapingBee or proxies)
-- ❌ Don't use synchronous request handling (always queue jobs via QStash)
+- ❌ Don't use synchronous request handling in production (queue jobs via QStash — currently synchronous in dev, must change before Vercel deploy)
 - ❌ Don't store API keys in code (use env vars + Secret Manager)
 - ❌ Don't skip caching layer (wastes money on duplicate scrapes)
 - ❌ Don't create long-running API routes (Vercel has 10s timeout on Hobby tier)
 
 ## Database Schema (Supabase)
 
-- `users` — managed by Supabase Auth; extended with `subscription_tier` (free/pro), `stripe_customer_id`
-- `transcripts` — `video_id` (unique), `language`, `content` (JSONB), `text_blob`, `created_at`
-- `request_logs` — usage tracking: `user_id`, `video_id`, `status`, `provider`, `cost_usd`
+Schema lives in `supabase/migrations/001_initial_schema.sql`.
+
+- `user_profiles` — extends `auth.users` with `subscription_tier` (free/pro), `stripe_customer_id`, `daily_extractions_count`, `daily_extractions_reset_at`. Auto-created on signup via trigger.
+- `transcripts` — `video_id` (unique), `language`, `content` (JSONB), `text_blob`, `created_at`, `updated_at`
+- `request_logs` — usage tracking: `user_id`, `video_id`, `status`, `provider`, `cost_usd`, `latency_ms`, `error_message`
 - `ai_summaries` — Phase 2 (deferred)
+
+**RLS policies:** Transcripts readable by all authenticated users. Request logs readable only by owning user. User profiles readable/updatable only by owning user. All writes require service_role.
+
+**Helper functions:** `increment_daily_extractions(p_user_id)`, `get_daily_extractions(p_user_id)` — handle daily counter with auto-reset.
 
 ## Environment & Secrets
 
@@ -159,21 +193,21 @@ SCRAPINGBEE_API_KEY=XXX...
 
 ## Build & Run Commands
 
-**Status: scaffold phase — apps not yet initialized.** Once set up:
-
 ### Frontend (`apps/web/`)
 ```bash
 npm install              # install dependencies
-npm run dev              # local dev server
+npm run dev              # local dev server (http://localhost:3000)
 npm run build            # production build
 npm run lint             # lint
 ```
 
 ### Worker (`apps/worker/`)
 ```bash
-python -m venv venv && source venv/bin/activate   # create/activate virtualenv
+python -m venv venv
+venv\Scripts\activate                              # Windows
+# source venv/bin/activate                         # macOS/Linux
 pip install -r requirements.txt                    # install dependencies
-uvicorn main:app --reload                          # local dev server
+uvicorn main:app --reload                          # local dev server (http://localhost:8000)
 pytest                                             # run tests
 ```
 
@@ -221,17 +255,17 @@ Before any deployment:
 
 ## Cost Tracking (Budget Sensitive)
 
-**Every request must log costs:**
+**Every request must log costs (use service-role client for writes):**
 ```typescript
-// In API route after extraction
-await supabase.from('request_logs').insert({
+// In API route after extraction — use serviceClient, not the anon client
+await serviceClient.from('request_logs').insert({
   user_id,
   video_id,
   status: 'success',
-  provider: 'scrapingbee', // or 'cache', 'youtube-api', 'error'
-  cost_usd: 0.003,          // ScrapingBee cost per request
+  provider: 'youtube_api', // or 'cache', 'db_cache', 'scrapingbee', 'error'
+  cost_usd: 0,             // youtube-transcript-api is free; ScrapingBee = $0.003
   latency_ms: 1240,
-  created_at: new Date()
+  error_message: undefined, // only for errors
 });
 ```
 

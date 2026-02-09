@@ -1,11 +1,18 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
+import { redis, TRANSCRIPT_CACHE_TTL } from "@/lib/redis";
 import type { TranscriptSegment } from "@/lib/types";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 const WORKER_URL = process.env.WORKER_URL || "http://localhost:8000";
 const FREE_TIER_DAILY_LIMIT = 5;
+
+/** Shape of the cached transcript data in Redis */
+interface CachedTranscript {
+  segments: TranscriptSegment[];
+  language: string;
+}
 
 interface WorkerResponse {
   video_id: string;
@@ -78,27 +85,58 @@ export async function POST(request: Request) {
     }
   }
 
-  // Check cache first (read via anon client — RLS allows SELECT for authenticated)
-  const { data: cached } = await supabase
+  // ── Tier 0: Check Redis cache (fastest) ──
+  try {
+    const redisCached = await redis.get<CachedTranscript>(`transcript:${video_id}`);
+    if (redisCached) {
+      const latency = Date.now() - startTime;
+      await logRequest(serviceClient, user.id, video_id, "cached", "cache", 0, latency);
+      await incrementDailyCount(serviceClient, user.id);
+
+      return NextResponse.json({
+        video_id,
+        segments: redisCached.segments,
+        language: redisCached.language,
+        cached: true,
+      });
+    }
+  } catch (e) {
+    // Redis failure is non-fatal — fall through to DB cache
+    console.error("Redis cache read failed:", e);
+  }
+
+  // ── Tier 1: Check database cache ──
+  const { data: dbCached } = await supabase
     .from("transcripts")
     .select("content, language")
     .eq("video_id", video_id)
     .single();
 
-  if (cached) {
+  if (dbCached) {
     const latency = Date.now() - startTime;
     await logRequest(serviceClient, user.id, video_id, "cached", "db_cache", 0, latency);
     await incrementDailyCount(serviceClient, user.id);
 
+    // Backfill Redis so next request is faster
+    try {
+      await redis.set<CachedTranscript>(
+        `transcript:${video_id}`,
+        { segments: dbCached.content as TranscriptSegment[], language: dbCached.language },
+        { ex: TRANSCRIPT_CACHE_TTL }
+      );
+    } catch (e) {
+      console.error("Redis backfill failed:", e);
+    }
+
     return NextResponse.json({
       video_id,
-      segments: cached.content,
-      language: cached.language,
+      segments: dbCached.content,
+      language: dbCached.language,
       cached: true,
     });
   }
 
-  // Call the Python worker
+  // ── Tier 2: Call the Python worker (fresh extraction) ──
   try {
     const workerResponse = await fetch(`${WORKER_URL}/extract`, {
       method: "POST",
@@ -121,7 +159,7 @@ export async function POST(request: Request) {
     const data: WorkerResponse = await workerResponse.json();
     const latency = Date.now() - startTime;
 
-    // Cache the transcript (write via service client — RLS requires service_role)
+    // Cache to database (write via service client — RLS requires service_role)
     const textBlob = data.segments.map(s => s.text).join(" ");
     await serviceClient.from("transcripts").upsert({
       video_id: data.video_id,
@@ -130,6 +168,17 @@ export async function POST(request: Request) {
       text_blob: textBlob,
       updated_at: new Date().toISOString(),
     });
+
+    // Cache to Redis (7-day TTL)
+    try {
+      await redis.set<CachedTranscript>(
+        `transcript:${video_id}`,
+        { segments: data.segments, language: data.language },
+        { ex: TRANSCRIPT_CACHE_TTL }
+      );
+    } catch (e) {
+      console.error("Redis cache write failed:", e);
+    }
 
     // Log the successful request (write via service client)
     await logRequest(serviceClient, user.id, video_id, "success", "youtube_api", 0, latency);
